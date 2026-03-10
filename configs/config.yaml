@@ -1,0 +1,120 @@
+# =============================================================================
+# NexusWAF RL Model — Master Configuration File
+# All hyperparameters, paths, and settings live here.
+# =============================================================================
+
+# --- Paths -------------------------------------------------------------------
+paths:
+  data_raw:        "data/raw"
+  data_processed:  "data/processed"
+  data_synthetic:  "data/synthetic"
+  checkpoints:     "checkpoints"
+  logs:            "logs/tensorboard"
+  results:         "results"
+
+# --- Dataset -----------------------------------------------------------------
+dataset:
+  # Expected files in data/raw/ after you download them:
+  #   csic_normalTrafico.txt   — CSIC 2010 normal traffic
+  #   csic_anomalousTrafico.txt — CSIC 2010 anomalous traffic
+  #   juice_shop_access.log    — OWASP Juice Shop Apache access log
+  #   nginx_benign.log         — Apache/Nginx benign production logs
+  #   sqli_payloads.txt        — GitHub/SecLists SQL injection payloads
+  #   xss_payloads.txt         — XSS payloads
+  #   path_traversal.txt       — Path traversal payloads
+  #   cmd_injection.txt        — Command injection payloads
+
+  train_split:  0.70
+  val_split:    0.15
+  test_split:   0.15
+  random_seed:  42
+
+  # Target composition (approximate)
+  # ~55% benign, ~45% attack
+  # Within attack: SQLi ≥3000, XSS ≥2000, Path ≥1500, Cmd ≥1000
+
+# --- Feature extraction ------------------------------------------------------
+features:
+  state_dim: 15          # Must match model input_dim
+  max_body_bytes: 8192
+  max_uri_length: 2048
+  risk_delta_lexical: 0.4
+  risk_delta_grammar: 0.3
+
+# --- RL Environment ----------------------------------------------------------
+environment:
+  episode_length: 500    # requests per episode
+  name: "NexusWAFEnv-v1"
+
+# --- DQN Model ---------------------------------------------------------------
+model:
+  input_dim: 15
+  hidden_dims: [128, 128, 64]  # Shared layers
+  value_hidden: 32             # Value stream hidden size
+  advantage_hidden: 32         # Advantage stream hidden size
+  num_actions: 7
+  dueling: true
+
+# --- Training ----------------------------------------------------------------
+training:
+  # Curriculum stages
+  curriculum:
+    stage1_epochs: 10    # Obvious cases only (risk > 0.7 or == 0)
+    stage2_epochs: 15    # Add ambiguous (risk 0.3-0.7)
+    stage3_epochs: 25    # Full adversarial mix
+    total_epochs: 50
+
+  # DQN hyperparameters
+  learning_rate: 3.0e-4
+  batch_size: 256
+  replay_buffer_size: 50000
+  min_replay_size: 1000        # Fill before starting gradient updates
+  target_update_freq: 500      # Steps between hard target network updates
+  gamma: 0.99                  # Discount factor
+  gradient_clip: 10.0
+
+  # Exploration (epsilon-greedy)
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay_steps: 20000
+
+  # Evaluation & checkpointing
+  eval_freq: 1000              # Evaluate every N training steps
+  checkpoint_keep: 3           # Keep N best checkpoints
+  early_stopping_patience: 5  # Stop if no improvement for N eval cycles
+  early_stopping_min_delta: 0.005
+
+# --- Reward function ---------------------------------------------------------
+reward:
+  true_positive:   1.0    # Attack correctly blocked
+  true_negative:   0.5    # Benign correctly allowed
+  false_positive: -1.5    # Benign wrongly blocked (penalise hard)
+  false_negative: -2.0    # Attack missed (worst case)
+  ml_waste:       -0.1    # ML invoked on obvious attack
+  ml_bonus:        0.3    # ML correctly catches ambiguous attack
+  latency_penalty: 0.2    # Per-unit latency excess penalty
+  latency_budget_ms: 2.0  # Allowed latency overhead in ms
+
+# --- Action space ------------------------------------------------------------
+actions:
+  # Index → name mapping (must stay in sync with environment.py)
+  0: "allow_no_ml"        # Allow, skip ML
+  1: "invoke_ml"          # Call ML microservice for analysis
+  2: "block_immediate"    # Block without ML
+  3: "log_and_allow"      # Allow but log for GPS analysis
+  4: "raise_threshold"    # Increase risk threshold (under load)
+  5: "lower_threshold"    # Decrease risk threshold (under attack)
+  6: "rate_limit_ip"      # Soft rate-limit on client IP
+
+# --- Evaluation targets ------------------------------------------------------
+evaluation:
+  target_precision: 0.92
+  target_recall: 0.90
+  target_fpr: 0.05
+  target_ml_invocation_rate: 0.30  # At most 30% requests should call ML
+
+# --- Integration (gRPC export) -----------------------------------------------
+integration:
+  export_path: "exports/nexus_rl_policy.pt"
+  grpc_port: 50052
+  onnx_export: false   # Set true to also export ONNX format
