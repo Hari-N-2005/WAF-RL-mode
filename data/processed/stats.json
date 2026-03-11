@@ -1,0 +1,33 @@
+{
+  "total_samples": 80203,
+  "train_samples": 28071,
+  "val_samples": 28071,
+  "test_samples": 24061,
+  "n_attack_train": 15471,
+  "n_benign_train": 12600,
+  "attack_type_counts": {
+    "sqli": 4967,
+    "cmd_injection": 37156,
+    "path_traversal": 1860,
+    "xss": 220
+  },
+  "state_dim": 15,
+  "feature_names": [
+    "risk_score",
+    "threat_tag_count",
+    "has_sqli",
+    "has_xss",
+    "has_path_traversal",
+    "has_cmd_injection",
+    "body_length_norm",
+    "uri_length_norm",
+    "query_param_count_norm",
+    "rate_limited",
+    "recent_attack_rate",
+    "p95_latency_norm",
+    "has_referer",
+    "content_type_encoded",
+    "grammar_risk"
+  ],
+  "synthetic_data": false
+}

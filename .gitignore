@@ -43,13 +43,6 @@ events.out.tfevents.*
 .DS_Store
 Thumbs.db
 
-# Data
-data/
-*.csv
-*.json
-*.pkl
-*.pickle
-
 # Evaluation results
 results/
 *.png

@@ -217,9 +217,9 @@ def balance_classes(
       - If attack% > target: downsample benign class (without replacement)
     """
     n = len(labels)
-    n_attack = labels.sum()
+    n_attack = int(labels.sum())
     n_benign = n - n_attack
-    current_ratio = n_attack / n
+    current_ratio = n_attack / n if n > 0 else 0
 
     rng = np.random.default_rng(seed)
 
@@ -230,23 +230,44 @@ def balance_classes(
     attack_idx = np.where(labels == 1)[0]
     benign_idx = np.where(labels == 0)[0]
 
+    # Handle edge cases: only one class present
+    if n_benign == 0:
+        print(f"  [ERROR] No benign samples found in dataset!")
+        print(f"  [ERROR] Cannot proceed with 100% attack samples.")
+        print(f"  [ERROR] Check that CSIC CSV has 'Normal' classification rows.")
+        print(f"  [ERROR] Or add benign logs to data/raw/ (nginx_benign.log, etc.)")
+        raise ValueError("Dataset has no benign samples. Training requires both classes.")
+    
+    if n_attack == 0:
+        print(f"  [ERROR] No attack samples found in dataset!")
+        print(f"  [ERROR] Cannot proceed with 100% benign samples.")
+        raise ValueError("Dataset has no attack samples. Training requires both classes.")
+
     if current_ratio < target_ratio:
         # Upsample attack class
         n_attack_target = int(n_benign * target_ratio / (1 - target_ratio))
         extra = n_attack_target - n_attack
-        extra_idx = rng.choice(attack_idx, size=extra, replace=True)
-        all_idx = np.concatenate([np.arange(n), extra_idx])
+        if extra > 0:
+            extra_idx = rng.choice(attack_idx, size=extra, replace=True)
+            all_idx = np.concatenate([np.arange(n), extra_idx])
+        else:
+            all_idx = np.arange(n)
     else:
         # Downsample benign class
         n_benign_target = int(n_attack * (1 - target_ratio) / target_ratio)
-        kept_benign = rng.choice(benign_idx, size=n_benign_target, replace=False)
-        all_idx = np.concatenate([attack_idx, kept_benign])
+        if n_benign_target > 0 and n_benign_target <= len(benign_idx):
+            kept_benign = rng.choice(benign_idx, size=n_benign_target, replace=False)
+            all_idx = np.concatenate([attack_idx, kept_benign])
+        else:
+            # Can't downsample that much, keep all data
+            print(f"  [WARN] Cannot balance to target ratio. Keeping all samples.")
+            all_idx = np.arange(n)
 
     # Shuffle
     all_idx = rng.permutation(all_idx)
 
     new_labels = labels[all_idx]
-    n_new_attack = new_labels.sum()
+    n_new_attack = int(new_labels.sum())
     n_new_total  = len(new_labels)
     print(f"  After:  {n_new_attack} attack ({100*n_new_attack/n_new_total:.1f}%), "
           f"{n_new_total - n_new_attack} benign ({100*(n_new_total-n_new_attack)/n_new_total:.1f}%)")

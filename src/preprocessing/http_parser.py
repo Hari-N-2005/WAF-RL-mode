@@ -16,6 +16,7 @@ fed into the feature extractor to produce state vectors.
 
 import re
 import os
+import io
 import random
 from dataclasses import dataclass, field
 from typing import List, Optional, Iterator, Dict
@@ -174,6 +175,146 @@ def _parse_raw_http_block(block: str, label: str, source: str) -> Optional[Parse
         req.body = "\n".join(lines[body_start:]).strip()
 
     return req
+
+
+# =============================================================================
+# CSIC 2010 Kaggle CSV Parser
+# =============================================================================
+# Columns (tab or comma separated):
+#   Method, User-Agent, Pragma, Cache-Control, Accept, Accept-encoding,
+#   Accept-charset, language, host, cookie, content-type, connection,
+#   lenght, content, classification, URL
+#
+# classification column values: "Normal" → benign, anything else → attack
+# The "content" column is the POST body.
+# The "URL" column is the full request URI.
+
+def parse_csic_csv(filepath: str) -> List[ParsedRequest]:
+    """
+    Parse the CSIC 2010 Kaggle CSV file (csic_database.csv).
+
+    Handles both tab-separated and comma-separated variants.
+    The 'classification' column drives the label:
+        'Normal' (case-insensitive) → benign
+        anything else               → attack
+
+    Args:
+        filepath: Path to csic_database.csv
+
+    Returns:
+        List of ParsedRequest objects
+    """
+    requests = []
+    
+    import csv  # stdlib module
+
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+            if not lines:
+                return requests
+            
+            # Fix CSIC CSV header issue: first column is empty but should be "label"
+            header_line = lines[0].strip()
+            if header_line.startswith(","):
+                header_line = "label," + header_line[1:]  # Add comma after "label"!
+            
+            # Split header into columns
+            header_fields = [h.strip().lower() for h in header_line.split(",")]
+            
+            # Parse data rows manually to handle complex quoting
+            for line_num, line in enumerate(lines[1:], start=2):
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    # Use csv.reader to handle quoted fields properly
+                    row_values = next(csv.reader([line]))
+                    
+                    # Create row dict by zipping headers with values
+                    # Handle case where row has different number of fields
+                    row = {}
+                    for i, field_name in enumerate(header_fields):
+                        if i < len(row_values):
+                            row[field_name] = row_values[i].strip() if row_values[i] else ""
+                        else:
+                            row[field_name] = ""
+                    
+                    # --- Label ---------------------------------------------------
+                    classification = row.get("label", row.get("classification", "")).lower()
+                    label = "benign" if classification == "normal" else "attack"
+
+                    # --- URI -----------------------------------------------------
+                    uri = row.get("url", "/")
+                    if not uri:
+                        uri = "/"
+                    # Some rows store just the path; others include full URL
+                    if uri.startswith("http://") or uri.startswith("https://"):
+                        from urllib.parse import urlparse
+                        parsed_url = urlparse(uri)
+                        uri = parsed_url.path
+                        if parsed_url.query:
+                            uri += "?" + parsed_url.query
+
+                    # --- Headers -------------------------------------------------
+                    headers = {}
+                    if row.get("user-agent"):
+                        headers["user-agent"] = row["user-agent"]
+                    if row.get("content-type"):
+                        headers["content-type"] = row["content-type"]
+                    if row.get("cookie"):
+                        headers["cookie"] = row["cookie"]
+                    if row.get("host"):
+                        headers["host"] = row["host"]
+                    if row.get("accept"):
+                        headers["accept"] = row["accept"]
+
+                    # --- Body (stored in 'content' column) -----------------------
+                    body = row.get("content", "")
+
+                    # --- Method --------------------------------------------------
+                    method = row.get("method", "GET").upper()
+                    if method not in {"GET", "POST", "PUT", "DELETE", "PATCH",
+                                       "HEAD", "OPTIONS"}:
+                        method = "GET"
+
+                    req = ParsedRequest(
+                        method=method,
+                        uri=uri,
+                        headers=headers,
+                        body=body,
+                        label=label,
+                        attack_type="none",  # will be inferred below
+                        source_dataset="csic2010_csv",
+                    )
+
+                    # Infer attack sub-type for attack rows
+                    if label == "attack":
+                        req.attack_type = _infer_attack_type_csic(req)
+
+                    requests.append(req)
+                    
+                except Exception as row_error:
+                    # Skip malformed rows
+                    if line_num <= 10:  # Only warn about first few errors
+                        print(f"[WARN] Skipping malformed row {line_num}: {row_error}")
+                    continue
+
+    except FileNotFoundError:
+        print(f"[WARN] CSIC CSV not found: {filepath}. Skipping.")
+        return requests
+    except Exception as e:
+        import traceback
+        print(f"[WRN] Error parsing CSIC CSV: {e}")
+        print(f"[WARN] Traceback: {traceback.format_exc()}")
+        return requests
+
+    n_attack = sum(1 for r in requests if r.label == "attack")
+    n_benign = len(requests) - n_attack
+    print(f"  CSIC CSV parsed: {len(requests)} total "
+          f"({n_benign} benign, {n_attack} attack)")
+    return requests
 
 
 def _infer_attack_type_csic(req: ParsedRequest) -> str:
@@ -432,17 +573,23 @@ def load_all_datasets(data_dir: str) -> List[ParsedRequest]:
     print("Loading datasets...")
     print("=" * 60)
 
-    # CSIC 2010 — Normal
-    path = os.path.join(raw_dir, "csic_normalTrafico.txt")
-    samples = parse_csic_file(path, "benign")
-    print(f"  CSIC Normal:           {len(samples):>6} samples")
-    all_requests.extend(samples)
+    # CSIC 2010 -- try Kaggle CSV first, fall back to raw txt files
+    csv_path = os.path.join(raw_dir, "csic_database.csv")
+    txt_norm  = os.path.join(raw_dir, "csic_normalTrafico.txt")
+    txt_anom  = os.path.join(raw_dir, "csic_anomalousTrafico.txt")
 
-    # CSIC 2010 — Anomalous
-    path = os.path.join(raw_dir, "csic_anomalousTrafico.txt")
-    samples = parse_csic_file(path, "attack")
-    print(f"  CSIC Anomalous:        {len(samples):>6} samples")
-    all_requests.extend(samples)
+    if os.path.exists(csv_path):
+        samples = parse_csic_csv(csv_path)
+        all_requests.extend(samples)
+    elif os.path.exists(txt_norm) or os.path.exists(txt_anom):
+        samples = parse_csic_file(txt_norm, "benign")
+        print(f"  CSIC Normal (txt):     {len(samples):>6} samples")
+        all_requests.extend(samples)
+        samples = parse_csic_file(txt_anom, "attack")
+        print(f"  CSIC Anomalous (txt):  {len(samples):>6} samples")
+        all_requests.extend(samples)
+    else:
+        print(f"  CSIC 2010:                [NOT FOUND -- skipping]")
 
     # OWASP Juice Shop logs
     path = os.path.join(raw_dir, "juice_shop_access.log")
